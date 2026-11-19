@@ -1,7 +1,6 @@
 export type PortalConfig = {
-  departments: string[]
-  semesters: string[]
-  categories: string[]
+  organizerName: string
+  organizerEmail: string
   retentionDays: number
   siteKey: string
 }
@@ -21,7 +20,7 @@ export class ApiError extends Error {
 
 export async function getConfig(signal?: AbortSignal): Promise<PortalConfig> {
   const response = await fetch('/api/config', { signal })
-  if (!response.ok) throw new Error('Registration options could not be loaded.')
+  if (!response.ok) throw new Error('Registration settings could not be loaded.')
   return response.json()
 }
 
@@ -34,13 +33,14 @@ export async function getReceipt(key: string, signal?: AbortSignal): Promise<Rec
   return response.json()
 }
 
-export function submit(data: FormData, key: string, onProgress: (percent: number | null) => void) {
+export function submit(data: FormData, key: string, onProgress: (percent: number | null) => void, onUploadStart: () => void) {
   return new Promise<Receipt>((resolve, reject) => {
     const request = new XMLHttpRequest()
     request.open('POST', '/api/registration')
     request.responseType = 'json'
     request.timeout = 95_000
     request.setRequestHeader('Idempotency-Key', key)
+    request.upload.onloadstart = onUploadStart
     request.upload.onprogress = event => {
       if (event.lengthComputable) onProgress(Math.round(event.loaded * 100 / event.total))
     }

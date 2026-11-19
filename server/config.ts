@@ -1,19 +1,5 @@
 import { z } from 'zod'
 
-const list = z.array(z.string().trim().min(1).max(100)).max(150)
-  .refine(items => new Set(items.map(item => item.toLowerCase())).size === items.length)
-
-function setting(name: string, min = 0): string[] {
-  let result
-  try {
-    result = list.safeParse(JSON.parse(process.env[name] ?? 'null'))
-  } catch {
-    throw new Error(`Invalid JSON for ${name}.`)
-  }
-  if (!result.success || result.data.length < min) throw new Error(`Invalid or missing ${name}.`)
-  return result.data
-}
-
 function integer(name: string, fallback: string, min: number, max: number) {
   const result = z.coerce.number().int().min(min).max(max).safeParse(process.env[name] ?? fallback)
   if (!result.success) throw new Error(`Invalid ${name}.`)
@@ -22,12 +8,10 @@ function integer(name: string, fallback: string, min: number, max: number) {
 
 export function config() {
   const production = process.env.NODE_ENV === 'production'
-  const departments = setting('DEPARTMENTS_JSON', 1)
-  const semesters = setting('SEMESTERS_JSON', 1)
-  const categories = setting('CATEGORIES_JSON')
-  if (categories.some(item => item.toLowerCase() === 'not specified')) {
-    throw new Error('Not specified is reserved for omitted categories.')
-  }
+  const organizerName = (process.env.ORGANIZER_NAME ?? '').trim()
+  const organizerEmail = (process.env.ORGANIZER_EMAIL ?? '').trim()
+  if (organizerName.length > 120 || /\p{Cc}/u.test(organizerName)) throw new Error('Invalid ORGANIZER_NAME.')
+  if (organizerEmail && !z.email().safeParse(organizerEmail).success) throw new Error('Invalid ORGANIZER_EMAIL.')
   const retentionDays = integer('RETENTION_DAYS', '', 1, 365)
   const proxyHops = integer('TRUST_PROXY_HOPS', '0', 0, 5)
   const origin = process.env.PUBLIC_ORIGIN ?? ''
@@ -43,7 +27,7 @@ export function config() {
     }
   }
   return {
-    production, departments, semesters, categories, retentionDays, proxyHops,
+    production, organizerName, organizerEmail, retentionDays, proxyHops,
     origin, siteKey, turnstileSecret, appSecret,
     port: integer('PORT', '3000', 1, 65535),
     rowLimit: integer('GOOGLE_ROW_LIMIT', '20000', 2, 100000),

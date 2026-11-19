@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto'
 import type { Pool } from 'pg'
 import type { Config } from './config.js'
 import type { Registration } from './db.js'
-import { digest, normalizeRoll, type Document, type validateFields } from './validation.js'
+import { normalizeRoll } from './student-fields.js'
+import { digest, type Document, type validateFields } from './validation.js'
 
 type Fields = ReturnType<typeof validateFields>['fields']
 

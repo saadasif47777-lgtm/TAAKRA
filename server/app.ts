@@ -5,7 +5,8 @@ import type { Pool } from 'pg'
 import type { Config } from './config.js'
 import { documentKeys, type Registration } from './db.js'
 import { keyHash, receipt, saveRegistration } from './registrations.js'
-import { digest, MAX_FILE, MAX_REQUEST, validateDocuments, validateFields } from './validation.js'
+import { MAX_FILE } from './student-fields.js'
+import { digest, MAX_REQUEST, validateDocuments, validateFields } from './validation.js'
 
 const parseUpload = multer({
   storage: multer.memoryStorage(),
@@ -78,8 +79,8 @@ export function createApp(pool: Pool, settings: Config, staticPath?: string) {
     res.json({ status: 'ok' })
   })
   app.get('/api/config', (_req, res) => {
-    const { departments, semesters, categories, retentionDays, siteKey } = settings
-    res.json({ departments, semesters, categories, retentionDays, siteKey })
+    const { organizerName, organizerEmail, retentionDays, siteKey } = settings
+    res.json({ organizerName, organizerEmail, retentionDays, siteKey })
   })
 
   app.get('/api/registration', throttle(pool, settings, 'receipt-ip', 180, 60), async (req, res) => {
@@ -132,7 +133,7 @@ export function createApp(pool: Pool, settings: Config, staticPath?: string) {
         })
       })
       const key = req.get('Idempotency-Key')!
-      const { fields, errors } = validateFields(req.body ?? {}, settings)
+      const { fields, errors } = validateFields(req.body ?? {})
       if (Object.keys(errors).length) {
         res.status(422).json({ message: 'Check the highlighted fields.', errors })
         return

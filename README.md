@@ -13,7 +13,7 @@ openssl rand -hex 32
 docker compose up -d --wait db
 ```
 
-Set `APP_SECRET` in `.env` to the generated value and set `RETENTION_DAYS` to your intended retention period. The example department and semester are for development. Replace them with the organizer’s choices for launch. Set `CATEGORIES_JSON` to the official choices, or use `[]` when categories are intentionally unavailable. Category stays optional in either case.
+Set `APP_SECRET` in `.env` to the generated value and set `RETENTION_DAYS` to your intended retention period. Students type their own department, semester, and optional category. Set `ORGANIZER_NAME` and `ORGANIZER_EMAIL` to publish approved contact information in the footer, or leave either blank to omit it.
 
 ```sh
 npm run db:migrate
@@ -22,7 +22,7 @@ npm run dev
 
 Open `http://localhost:5173`. To test the production bundle locally, run `npm run build` and `npm start`, then open `http://localhost:3000`. Local operation may omit Google and Turnstile. Submissions still save to PostgreSQL and show **Received — processing** until a configured Google worker completes them. Use synthetic forms and images during development.
 
-The included [illustration](public/taakra-art.webp) was generated from the written brief. Replace it with the official artwork at that path before launch. If its aspect ratio differs, update the image dimensions and alt text in [App.tsx](src/App.tsx). The browser renders the image at its native aspect ratio.
+The included [illustration](public/taakra-art.webp) was generated from the written brief. Replace it with the official artwork at that path before launch. If its aspect ratio differs, update the image dimensions and alt text in [Hero.tsx](src/Hero.tsx). The browser renders the image at its native aspect ratio.
 
 ## Google setup
 
@@ -82,7 +82,7 @@ Set these production options:
 - Allow outbound HTTPS to `www.googleapis.com`, `sheets.googleapis.com`, `oauth2.googleapis.com`, and `challenges.cloudflare.com`, plus any identity-provider endpoints required by your authentication method.
 - Route the public origin to the Express service on port 3000. Use `/healthz` as the DB-backed liveness/readiness endpoint. Configure alerts on worker retry logs and monitor the count and age of pending and purging records. Avoid logging multipart bodies, form fields, private URLs, receipt headers, credentials, or Google response objects.
 
-The app returns **Received — processing** once the database commits and **Registration complete** only after Google confirms all data writes. Students can check status while their tab is open. The retry key is opaque and stays in memory with the receipt. Uploaded documents and form fields are never written to browser storage.
+The app returns **Received — processing** once the database commits and **Registration submitted** only after Google confirms all data writes. Students can check status while their tab is open. The retry key is opaque and stays in memory with the receipt. Uploaded documents and form fields are never written to browser storage.
 
 ## Verification
 
@@ -93,6 +93,6 @@ TEST_DATABASE_URL='postgresql://taakra:taakra-local@127.0.0.1:5432/taakra' \
 TEST_CHROMIUM_EXECUTABLE=/usr/bin/chromium npm test
 ```
 
-The suite uses real PostgreSQL and the public HTTP API. It covers optional category submission, required fields and document checks, metadata removal, concurrent duplicates, client interruption, and worker recovery after lost Drive/Sheets responses using a simulated Google transport. Supply `TEST_CHROMIUM_EXECUTABLE` to run the desktop layout and mobile keyboard, reduced-motion, upload preview and pending-state browser checks. Without it the browser test is skipped.
+The suite uses real PostgreSQL and the public HTTP API. It covers manual student details, optional category, required fields and document checks, metadata removal, concurrent duplicates, client interruption, and worker recovery after lost Drive/Sheets responses using a test-only Google transport. Supply `TEST_CHROMIUM_EXECUTABLE` to check viewport widths, mobile keyboard focus, hero links, reduced motion, upload previews, retry and receipt download. Without it the browser test is skipped.
 
-Live Google acceptance needs the organizer’s configured environment. After `google:setup -- verify` succeeds, submit a synthetic registration over HTTPS without a category. Wait for **Registration complete** and download its receipt. In the organizer account, check the four readable files and matching spreadsheet row. Verify the category is **Not specified**, roll and mobile are strings, and review status is **Pending review**. Open the document and spreadsheet links from a signed-out browser and an account outside the approved staff list and confirm access is denied. Test on an actual mobile device for gallery and camera picker behavior.
+Live Google acceptance needs the organizer’s configured environment. After `google:setup -- verify` succeeds, submit a synthetic registration over HTTPS without a category. Wait for **Registration submitted** and download its receipt. Confirm both use Pakistan time. In the organizer account, check the four readable files and matching spreadsheet row. Verify the category is **Not specified**, roll and mobile are strings, and review status is **Pending review**. Open the document and spreadsheet links from a signed-out browser and an account outside the approved staff list and confirm access is denied. Test on an actual mobile device for gallery and camera picker behavior.
