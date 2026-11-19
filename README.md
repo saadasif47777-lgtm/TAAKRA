@@ -70,6 +70,8 @@ node dist-server/migrate.js
 node dist-server/index.js
 ```
 
+If your build network uses an organization CA, pass its trusted PEM bundle with `docker build --secret id=npm_ca,src=/path/to/trusted-ca.pem -t taakra-portal .`. The bundle is mounted only during dependency installation.
+
 Inside the image, the equivalent one-off migration command is `node dist-server/migrate.js`. The Docker image starts the web service by default. For a host running from source, run `npm ci && npm run build` before the migration. Use `node dist-server/google-setup.js verify` to verify Google from a deployment without dev dependencies.
 
 Set these production options:
