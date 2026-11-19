@@ -9,10 +9,10 @@ RUN npm run build && npm prune --omit=dev --offline --no-audit
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
-COPY --from=build /app/node_modules ./node_modules
-COPY --from=build /app/dist ./dist
-COPY --from=build /app/dist-server ./dist-server
-COPY package.json ./
+COPY --chown=node:node --from=build /app/node_modules ./node_modules
+COPY --chown=node:node --from=build /app/dist ./dist
+COPY --chown=node:node --from=build /app/dist-server ./dist-server
+COPY --chown=node:node package.json ./
 USER node
 EXPOSE 3000
 CMD ["node", "dist-server/index.js"]
