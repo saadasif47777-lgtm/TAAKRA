@@ -1,0 +1,18 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: taakra
+      POSTGRES_PASSWORD: taakra-local
+      POSTGRES_DB: taakra
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - taakra-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taakra -d taakra"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+volumes:
+  taakra-db:

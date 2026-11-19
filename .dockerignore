@@ -1,0 +1,8 @@
+.git
+node_modules
+dist
+dist-server
+.env*
+*.secret
+playwright-report
+test-results
