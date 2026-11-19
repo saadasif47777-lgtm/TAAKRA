@@ -6,3 +6,4 @@ dist-server
 *.secret
 playwright-report
 test-results
+.cache/

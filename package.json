@@ -7,11 +7,13 @@
     "node": ">=22.12"
   },
   "scripts": {
+    "setup": "node scripts/setup.mjs",
     "dev": "concurrently -k \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch --env-file-if-exists=.env server/index.ts",
     "dev:web": "vite --host 0.0.0.0",
     "build": "tsc -p tsconfig.json && vite build && tsc -p tsconfig.server.json",
     "start": "node --env-file-if-exists=.env dist-server/index.js",
+    "start:deploy": "node --env-file-if-exists=.env dist-server/index.js --migrate",
     "db:migrate": "tsx --env-file-if-exists=.env server/migrate.ts",
     "google:setup": "tsx --env-file-if-exists=.env server/google-setup.ts",
     "test": "tsx --test tests/*.test.ts"

@@ -73,3 +73,9 @@ CREATE TABLE IF NOT EXISTS rate_windows (
 CREATE INDEX IF NOT EXISTS registrations_work ON registrations (next_attempt) WHERE status <> 'complete';
 CREATE INDEX IF NOT EXISTS registrations_retention ON registrations (expires_at);
 `
+
+export async function migrateDatabase(pool: pg.Pool) {
+  // PostgreSQL runs these statements as one transaction and serializes concurrent startup migrations.
+  await pool.query(`SELECT pg_advisory_xact_lock(20270110);
+${schema}`)
+}

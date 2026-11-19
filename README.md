@@ -4,23 +4,17 @@ A public, account-free registration portal with a React frontend, an Express API
 
 ## Run locally
 
-Use Node.js 22.12 or newer and PostgreSQL 17. Docker Compose can provide a local database.
+Use Node.js 22.12 or newer and a running Docker Compose installation.
 
 ```sh
-npm ci
-cp .env.example .env
-openssl rand -hex 32
-docker compose up -d --wait db
+npm run setup
 ```
 
-Set `APP_SECRET` in `.env` to the generated value and set `RETENTION_DAYS` to your intended retention period. Students type their own department, semester, and optional category. Set `ORGANIZER_NAME` and `ORGANIZER_EMAIL` to publish approved contact information in the footer, or leave either blank to omit it.
+This installs the locked dependencies, fills missing development settings in `.env`, starts local PostgreSQL, applies the schema, and starts the API and frontend. The generated app secret is reused on subsequent runs. The default retention is seven days for development. If you set a custom `DATABASE_URL`, setup uses that database instead of starting Docker, so make sure it is a development database with schema creation privileges.
 
-```sh
-npm run db:migrate
-npm run dev
-```
+Open `http://localhost:5173` after both servers start. To restart the app while PostgreSQL is running, use `npm run dev`. To try the built bundle locally, run `npm run build` and `npm start`, then open `http://localhost:3000`. See [the environment example](.env.example) for optional settings such as `ORGANIZER_NAME` and `ORGANIZER_EMAIL`.
 
-Open `http://localhost:5173`. To test the production bundle locally, run `npm run build` and `npm start`, then open `http://localhost:3000`. Local operation may omit Google and Turnstile. Submissions still save to PostgreSQL and show **Received — processing** until a configured Google worker completes them. Use synthetic forms and images during development.
+Development can run without Google and Turnstile. Submissions save to PostgreSQL and show **Received — processing** until a configured Google worker completes them. Use synthetic forms and images during development.
 
 The included [illustration](public/taakra-art.webp) was generated from the written brief. Replace it with the official artwork at that path before launch. If its aspect ratio differs, update the image dimensions and alt text in [Hero.tsx](src/Hero.tsx). The browser renders the image at its native aspect ratio.
 
@@ -61,18 +55,19 @@ The worker reserves five Drive IDs before creating storage, verifies the expecte
 
 Use a long-running Node.js/container host with a private managed PostgreSQL database. The process runs the HTTP API and retry worker together and needs network access to PostgreSQL and Google. Use a database connection that supports PostgreSQL session advisory locks (a direct connection or session pool). Keep the database encrypted at rest, use TLS for remote DB connections, and limit its access to the application and operators. Keep `APP_SECRET` stable for the lifecycle of the database because it keys duplicate detection and receipt lookups.
 
-Build and run the included image, or use the equivalent Node commands on your host.
+Build the app, then configure the production variables in your host’s environment or secret manager. Set an approved `RETENTION_DAYS` value and generate a dedicated, stable production `APP_SECRET`.
+
+For a source deployment, run `npm ci && npm run build` and set the start command to:
 
 ```sh
-docker build -t taakra-portal .
-# Inject production configuration and secrets into both the migration job and the web service.
-node dist-server/migrate.js
-node dist-server/index.js
+npm run start:deploy
 ```
 
-If your build network uses an organization CA, pass its trusted PEM bundle with `docker build --secret id=npm_ca,src=/path/to/trusted-ca.pem -t taakra-portal .`. The bundle is mounted only during dependency installation.
+For a container deployment, build with `docker build -t taakra-portal .` and set the container command to `node dist-server/index.js --migrate`. Both start commands apply the schema before accepting traffic and require database migration privileges. The migrations are safe to rerun and are serialized across concurrent starts.
 
-Inside the image, the equivalent one-off migration command is `node dist-server/migrate.js`. The Docker image starts the web service by default. For a host running from source, run `npm ci && npm run build` before the migration. Use `node dist-server/google-setup.js verify` to verify Google from a deployment without dev dependencies.
+If the application uses a separate, restricted database role, run `node dist-server/migrate.js` as a one-off release job with the migration role, then use the image’s default command or `npm start` for the web service.
+
+If your build network uses an organization CA, pass its trusted PEM bundle with `docker build --secret id=npm_ca,src=/path/to/trusted-ca.pem -t taakra-portal .`. The bundle is mounted only during dependency installation. Use `node dist-server/google-setup.js verify` to verify Google in a deployment without development dependencies.
 
 Set these production options:
 

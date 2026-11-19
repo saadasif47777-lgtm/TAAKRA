@@ -1,8 +1,8 @@
-import { createPool, schema } from './db.js'
+import { createPool, migrateDatabase } from './db.js'
 
 const pool = createPool()
 try {
-  await pool.query(schema)
+  await migrateDatabase(pool)
   console.log('Database schema is ready.')
 } catch {
   console.error('Database migration failed. Check connectivity and migration privileges.')

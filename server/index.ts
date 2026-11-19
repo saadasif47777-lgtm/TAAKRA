@@ -1,7 +1,7 @@
 import { resolve } from 'node:path'
 import { createApp } from './app.js'
-import { config } from './config.js'
-import { createPool } from './db.js'
+import { config, ConfigurationError } from './config.js'
+import { createPool, migrateDatabase } from './db.js'
 import { configuredGoogle } from './google.js'
 import { startWorker } from './worker.js'
 
@@ -10,11 +10,18 @@ async function main() {
   const google = settings.production || process.env.GOOGLE_AUTH_MODE ? await configuredGoogle(settings.rowLimit) : null
   const pool = createPool()
   pool.on('error', () => console.error('An idle database connection failed.'))
+  const migrateOnStart = process.argv.includes('--migrate')
   try {
+    if (migrateOnStart) {
+      await migrateDatabase(pool)
+      console.log('Database schema is ready.')
+    }
     await pool.query('SELECT next_row FROM registration_sheet_cursor WHERE singleton')
   } catch {
     await pool.end()
-    throw new Error('Database is unavailable or has not been migrated.')
+    throw new ConfigurationError(migrateOnStart
+      ? 'Database startup migration failed. Check connectivity and schema privileges.'
+      : 'Database is unavailable or has not been migrated.')
   }
 
   const server = createApp(pool, settings, resolve('dist')).listen(settings.port, settings.production ? '0.0.0.0' : '127.0.0.1')
@@ -30,7 +37,7 @@ async function main() {
   process.once('SIGTERM', stop)
 }
 
-main().catch(() => {
-  console.error('Server startup failed. Check configuration, credentials and database migrations.')
+main().catch(error => {
+  console.error(error instanceof ConfigurationError ? error.message : 'Server startup failed. Check server and Google configuration.')
   process.exitCode = 1
 })
