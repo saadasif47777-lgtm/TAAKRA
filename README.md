@@ -24,30 +24,30 @@ Enable the **Drive API** and **Sheets API** in an organizer-controlled Google Cl
 
 ### Organizer’s personal Google account
 
-1. Configure the project’s OAuth consent screen and a **Web application** OAuth client. Add the exact authorized redirect URI `http://127.0.0.1:53682/oauth/callback`.
-2. On a trusted organizer workstation set `GOOGLE_AUTH_MODE=oauth`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN_FILE`. The file path should be new and in a private directory. Run:
-   ```sh
-   npm run google:setup -- oauth
-   ```
-3. Open the consent URL from the terminal on that workstation, sign in as the organizer, and grant access. The loopback callback verifies state and PKCE and writes the refresh token to a private file. Mount that file read-only on the server, or supply `GOOGLE_REFRESH_TOKEN` via a secret manager. Keep the client secret server-side. The public server does not expose OAuth routes.
+Create a **Web application** OAuth client in the organizer’s Google Cloud project. Configure its consent screen and add the exact authorized redirect URI `http://127.0.0.1:53682/oauth/callback`. On the organizer’s workstation, set `GOOGLE_AUTH_MODE=oauth`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_ALLOWED_EMAILS` to the organizer’s email and any explicitly approved staff. Then run the provisioning command below.
 
-The server refreshes access tokens automatically. External OAuth projects in Testing generally issue refresh tokens with a seven-day lifetime for these scopes. Complete applicable Google consent publishing and verification requirements before relying on unattended sync. If access is revoked or the refresh token expires, reauthorize with a fresh output path, update the server secret, restart, and run the Google setup checks. Pending registrations resume under their existing references.
+If an organizer token is missing, the command prints a consent URL. Open it on that workstation, sign in as the organizer, and approve access. The loopback callback verifies state and PKCE, saves the refresh token in `.taakra-google-oauth.secret` (or the configured `GOOGLE_REFRESH_TOKEN_FILE`), and continues provisioning.
+
+The server refreshes access tokens automatically. External OAuth projects in Testing generally issue refresh tokens with a seven-day lifetime for these scopes. Complete applicable Google consent publishing and verification requirements for unattended sync. If a token expires or access is revoked, run `npm run google:setup -- oauth` with a fresh `GOOGLE_REFRESH_TOKEN_FILE` path. Update the server secret, restart, and rerun the Google setup checks. Pending registrations resume under their existing references.
 
 ### Google Workspace Shared Drive
 
-Use a Shared Drive dedicated to the organizer and authorized staff. Grant the service account the permissions needed to create and read files, inspect permissions, edit the spreadsheet, and permanently delete the expired registration folders. Shared Drive Manager access is the practical option when permanent deletion is required. Set `GOOGLE_AUTH_MODE=service-account` and provide Application Default Credentials through a supported workload identity or a mounted credential file referenced by `GOOGLE_APPLICATION_CREDENTIALS`. Use the service account’s email in `GOOGLE_ALLOWED_EMAILS`. Service accounts use Shared Drive storage in this workflow.
+Use a Shared Drive dedicated to the organizer and authorized staff. Grant the service account the permissions needed to create and read files, inspect permissions, edit the spreadsheet, and permanently delete expired registration folders. Shared Drive Manager access is the practical option when permanent deletion is required. Set `GOOGLE_AUTH_MODE=service-account` and provide Application Default Credentials through a supported workload identity or a mounted credential file referenced by `GOOGLE_APPLICATION_CREDENTIALS`. Set `GOOGLE_SHARED_DRIVE_ID` to the destination drive’s ID and include the service account and authorized drive members in `GOOGLE_ALLOWED_EMAILS`.
 
-### Prepare private resources
+### Create and verify private resources
 
-1. In the chosen Google account or Shared Drive, create a folder named **TAAKRA 2027 Registrations** and an empty Google spreadsheet inside it. Rename the worksheet tab to **Registrations**.
-2. Set `GOOGLE_PARENT_FOLDER_ID` and `GOOGLE_SPREADSHEET_ID` from the organizer’s resource URLs. Add the organizer and only approved principals to `GOOGLE_ALLOWED_EMAILS`. If using an explicitly approved group, restrict and audit its membership.
-3. Use **Restricted** sharing. Audit inherited permissions, including all Shared Drive members. Keep public and domain-wide sharing disabled. Staff should only change column N (review status) in the registration worksheet. Keep filters as personal filter views, and avoid sorting, moving, inserting, or deleting rows in the underlying tab. Row numbers are reserved in PostgreSQL and form part of the retry contract.
-4. Configure `GOOGLE_ROW_LIMIT` for the total number of worksheet rows including the header. Before launching or increasing capacity, run:
-   ```sh
-   npm run google:setup -- prepare
-   npm run google:setup -- verify
-   ```
-   Preparation expands the grid if needed and writes headers into row 1 if it is empty. Verification checks the folder, spreadsheet placement, approved sharing permissions, header, and grid capacity. Use a single DB and workbook pair. Never point multiple independent databases at one worksheet.
+```sh
+npm run google:setup -- provision
+npm run google:setup -- verify
+```
+
+Provisioning creates **TAAKRA 2027 Registrations** in My Drive or the selected Shared Drive, creates a spreadsheet inside it, adds the **Registrations** tab at the configured capacity, and writes the headers. It verifies permissions and saves the resource IDs in the private `.taakra-google.secret` file (override with `GOOGLE_RESOURCES_FILE`). Rerun with the same file to resume setup or verify that the resources are ready. If the Drive request to create the spreadsheet was interrupted, the command looks for the original spreadsheet before making further changes. A previous spreadsheet creation with an unknown outcome requires reconciliation in Drive if it stays unresolved after retry. Remove a leftover `<provisioning-file>.lock.secret` only after confirming the prior command has stopped.
+
+Mount the finished resource file read-only at the server’s configured path, or set both `GOOGLE_PARENT_FOLDER_ID` and `GOOGLE_SPREADSHEET_ID` in the server environment. Mount the OAuth refresh-token file read-only or supply `GOOGLE_REFRESH_TOKEN` with your secret manager. Keep the OAuth client secret and both files out of source control. Restart the server after configuring access. The public server exposes no OAuth or provisioning routes.
+
+If you already have a private folder and its spreadsheet, set both resource IDs and use `npm run google:setup -- prepare` followed by `npm run google:setup -- verify`. The folder must be named **TAAKRA 2027 Registrations** and the sheet must already have a **Registrations** tab. Set `GOOGLE_ROW_LIMIT` and rerun `prepare` to expand capacity. Use a single database and workbook pair.
+
+Keep Google sharing **Restricted** and audit inherited permissions and approved group membership. Provisioning does not add collaborators. Staff should only change column N (review status) and use personal filter views. Row numbers are part of the retry contract, so avoid sorting, moving, inserting, or deleting rows in the underlying tab.
 
 The worker reserves five Drive IDs before creating storage, verifies the expected folder and four files at those IDs, then writes the assigned spreadsheet row with **RAW** string values. It verifies access controls on the parent, spreadsheet and created Drive resources. Expired records are removed from the active worksheet and Drive (including their folder contents), and local document bytes are dropped after successful sync or at retention expiry. Cleanup of remote copies retries when Google access is unavailable. Set retention for managed backups and review Google version history, organizational retention, and recovery policies separately.
 
@@ -88,6 +88,6 @@ TEST_DATABASE_URL='postgresql://taakra:taakra-local@127.0.0.1:5432/taakra' \
 TEST_CHROMIUM_EXECUTABLE=/usr/bin/chromium npm test
 ```
 
-The suite uses real PostgreSQL and the public HTTP API. It covers manual student details, optional category, required fields and document checks, metadata removal, concurrent duplicates, client interruption, and worker recovery after lost Drive/Sheets responses using a test-only Google transport. Supply `TEST_CHROMIUM_EXECUTABLE` to check viewport widths, mobile keyboard focus, hero links, reduced motion, upload previews, retry and receipt download. Without it the browser test is skipped.
+The suite uses real PostgreSQL and the public HTTP API. It covers Google provisioning retries and permission checks against a test-only transport, manual student details, optional category, required fields and document checks, metadata removal, concurrent duplicates, client interruption, and worker recovery after lost Drive/Sheets responses using a test-only Google transport. Supply `TEST_CHROMIUM_EXECUTABLE` to check viewport widths, mobile keyboard focus, hero links, reduced motion, upload previews, retry and receipt download. Without it the browser test is skipped.
 
 Live Google acceptance needs the organizer’s configured environment. After `google:setup -- verify` succeeds, submit a synthetic registration over HTTPS without a category. Wait for **Registration submitted** and download its receipt. Confirm both use Pakistan time. In the organizer account, check the four readable files and matching spreadsheet row. Verify the category is **Not specified**, roll and mobile are strings, and review status is **Pending review**. Open the document and spreadsheet links from a signed-out browser and an account outside the approved staff list and confirm access is denied. Test on an actual mobile device for gallery and camera picker behavior.

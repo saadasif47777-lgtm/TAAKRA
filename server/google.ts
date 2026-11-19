@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { GoogleAuth, OAuth2Client, type AuthClient } from 'google-auth-library'
-import { need } from './config.js'
+import { ConfigurationError, need } from './config.js'
+import { configuredResources, googleId, type ResourceManifest } from './google-resources.js'
 import type { Registration } from './db.js'
 import type { Document } from './validation.js'
 
@@ -11,6 +12,7 @@ const upload = 'https://www.googleapis.com/upload/drive/v3'
 const sheets = 'https://sheets.googleapis.com/v4/spreadsheets'
 const folderMime = 'application/vnd.google-apps.folder'
 const sheetMime = 'application/vnd.google-apps.spreadsheet'
+const folderName = 'TAAKRA 2027 Registrations'
 
 export const headers = [
   'Registration reference', 'Submitted timestamp', 'Student name', 'Roll number',
@@ -18,11 +20,15 @@ export const headers = [
   'Student ID card', 'CNIC front', 'CNIC back', 'Student folder', 'Review status',
 ]
 
+export function refreshTokenFile() {
+  return process.env.GOOGLE_REFRESH_TOKEN_FILE || '.taakra-google-oauth.secret'
+}
+
 export async function googleClient(): Promise<AuthClient> {
   if (process.env.GOOGLE_AUTH_MODE === 'oauth') {
     const client = new OAuth2Client(need('GOOGLE_CLIENT_ID'), need('GOOGLE_CLIENT_SECRET'))
     const refresh = process.env.GOOGLE_REFRESH_TOKEN ||
-      readFileSync(need('GOOGLE_REFRESH_TOKEN_FILE'), 'utf8').trim()
+      readFileSync(refreshTokenFile(), 'utf8').trim()
     if (!refresh) throw new Error('Google refresh token is empty.')
     client.setCredentials({ refresh_token: refresh })
     return client
@@ -58,21 +64,15 @@ export interface GoogleStorage {
   removeFolder(id: string): Promise<void>
 }
 
-export class GoogleApi implements GoogleStorage {
-  constructor(
-    private client: AuthClient,
-    private parent: string,
-    private workbook: string,
-    private approved: Set<string>,
-    private rowLimit: number,
-  ) {}
+class GoogleDrive {
+  constructor(protected client: AuthClient, protected approved: Set<string>) {}
 
-  private async request<T>(url: string, method = 'GET', data?: unknown, headers?: Record<string, string>) {
+  protected async request<T>(url: string, method = 'GET', data?: unknown, headers?: Record<string, string>) {
     const response = await this.client.request<T>({ url, method, data, headers, timeout: 25_000, retry: false })
     return response.data
   }
 
-  async file(id: string) {
+  protected async file(id: string) {
     try {
       return await this.request<FileMetadata>(`${drive}/files/${id}?supportsAllDrives=true&fields=${fileFields}`)
     } catch (error) {
@@ -81,11 +81,11 @@ export class GoogleApi implements GoogleStorage {
     }
   }
 
-  private async permissions(id: string) {
+  protected async permissions(id: string) {
     let pageToken = ''
     do {
       const query = new URLSearchParams({
-        supportsAllDrives: 'true', fields: 'nextPageToken,permissions(type,emailAddress,deleted,view)', pageSize: '100',
+        supportsAllDrives: 'true', includePermissionsForView: 'published', fields: 'nextPageToken,permissions(type,emailAddress,deleted,view)', pageSize: '100',
       })
       if (pageToken) query.set('pageToken', pageToken)
       const response = await this.request<{
@@ -96,17 +96,56 @@ export class GoogleApi implements GoogleStorage {
         if (permission.deleted) continue
         const email = permission.emailAddress?.toLowerCase() ?? ''
         if (!['user', 'group'].includes(permission.type) || permission.view || !this.approved.has(email)) {
-          throw new Error('A Google resource has an unapproved permission.')
+          throw new ConfigurationError('A Google resource has an unapproved permission.')
         }
       }
       pageToken = response.nextPageToken ?? ''
     } while (pageToken)
   }
 
+  protected async generateIds(count: number) {
+    const response = await this.request<{ ids: string[] }>(`${drive}/files/generateIds?count=${count}&space=drive`)
+    if (response.ids?.length !== count || new Set(response.ids).size !== count ||
+        response.ids.some(id => !googleId.safeParse(id).success)) throw new Error('Drive returned an invalid ID allocation.')
+    return response.ids
+  }
+
+  protected async ensureFile(
+    id: string, parent: string, name: string, mimeType: string,
+    create: () => Promise<FileMetadata>, checksum?: string,
+  ) {
+    let file = await this.file(id)
+    if (!file) {
+      try {
+        file = await create()
+      } catch (error) {
+        if (status(error) !== 409) throw error
+        file = await this.file(id)
+      }
+    }
+    if (!file || file.id !== id || file.trashed || file.name !== name || file.mimeType !== mimeType ||
+        !file.parents?.includes(parent) || (checksum && file.md5Checksum !== checksum)) {
+      throw new Error('Drive did not confirm the expected file.')
+    }
+    await this.permissions(id)
+  }
+}
+
+export class GoogleApi extends GoogleDrive implements GoogleStorage {
+  constructor(
+    client: AuthClient,
+    private parent: string,
+    private workbook: string,
+    approved: Set<string>,
+    private rowLimit: number,
+  ) {
+    super(client, approved)
+  }
+
   async checkResources() {
     const parent = await this.file(this.parent)
     const sheet = await this.file(this.workbook)
-    if (parent?.mimeType !== folderMime || parent.name !== 'TAAKRA 2027 Registrations' || parent.trashed ||
+    if (parent?.mimeType !== folderMime || parent.name !== folderName || parent.trashed ||
         sheet?.mimeType !== sheetMime || sheet.trashed ||
         !sheet.parents?.includes(this.parent)) throw new Error('Google registration resources are missing or misplaced.')
     if (process.env.GOOGLE_AUTH_MODE === 'service-account' && !parent.driveId) {
@@ -116,14 +155,24 @@ export class GoogleApi implements GoogleStorage {
     await this.permissions(this.workbook)
   }
 
-  async verifySetup(prepare = false) {
+  async verifySetup(prepare = false, createWorksheet = false) {
     await this.checkResources()
     type Grid = { title: string; sheetId: number; gridProperties: { rowCount: number; columnCount: number } }
     const url = `${sheets}/${this.workbook}`
     const workbook = await this.request<{ sheets: { properties: Grid }[] }>(
       `${url}?fields=sheets(properties(title,sheetId,gridProperties))`)
     const worksheet = workbook.sheets.find(sheet => sheet.properties.title === 'Registrations')?.properties
-    if (!worksheet) throw new Error('Create a Registrations worksheet first.')
+    if (!worksheet) {
+      if (!createWorksheet) throw new Error('Create a Registrations worksheet first.')
+      await this.request(`${url}:batchUpdate`, 'POST', {
+        requests: [{ addSheet: { properties: {
+          title: 'Registrations',
+          gridProperties: { rowCount: this.rowLimit, columnCount: headers.length },
+        } } }],
+      })
+      await this.verifySetup(true)
+      return
+    }
     const grid = worksheet.gridProperties
     if (grid.rowCount < this.rowLimit || grid.columnCount < headers.length) {
       if (!prepare) throw new Error('The registration worksheet has insufficient capacity.')
@@ -151,29 +200,7 @@ export class GoogleApi implements GoogleStorage {
   }
 
   async reserveIds() {
-    const response = await this.request<{ ids: string[] }>(`${drive}/files/generateIds?count=5&space=drive`)
-    if (response.ids?.length !== 5 || new Set(response.ids).size !== 5) throw new Error('Drive returned an invalid ID allocation.')
-    return response.ids
-  }
-
-  private async ensureFile(
-    id: string, parent: string, name: string, mimeType: string,
-    create: () => Promise<FileMetadata>, checksum?: string,
-  ) {
-    let file = await this.file(id)
-    if (!file) {
-      try {
-        file = await create()
-      } catch (error) {
-        if (status(error) !== 409) throw error
-        file = await this.file(id)
-      }
-    }
-    if (!file || file.id !== id || file.trashed || file.name !== name || file.mimeType !== mimeType ||
-        !file.parents?.includes(parent) || (checksum && file.md5Checksum !== checksum)) {
-      throw new Error('Drive did not confirm the expected file.')
-    }
-    await this.permissions(id)
+    return this.generateIds(5)
   }
 
   async saveFolder(id: string, reference: string) {
@@ -253,13 +280,123 @@ export class GoogleApi implements GoogleStorage {
   }
 }
 
-export async function configuredGoogle(rowLimit: number) {
+export function approvedGoogleEmails() {
   const approved = new Set(need('GOOGLE_ALLOWED_EMAILS').split(',').map(email => email.trim().toLowerCase()).filter(Boolean))
   if (!approved.size || [...approved].some(email => !/^[^\s@]+@[^\s@]+$/.test(email))) {
-    throw new Error('GOOGLE_ALLOWED_EMAILS must list the approved Google principals.')
+    throw new ConfigurationError('GOOGLE_ALLOWED_EMAILS must list the approved Google principals.')
   }
-  const parent = need('GOOGLE_PARENT_FOLDER_ID')
-  const workbook = need('GOOGLE_SPREADSHEET_ID')
-  if (![parent, workbook].every(id => /^[\w-]+$/.test(id))) throw new Error('Invalid Google resource IDs.')
-  return new GoogleApi(await googleClient(), parent, workbook, approved, rowLimit)
+  return approved
+}
+
+export async function configuredGoogle(rowLimit: number) {
+  const { folderId, spreadsheetId } = configuredResources()
+  return new GoogleApi(await googleClient(), folderId, spreadsheetId, approvedGoogleEmails(), rowLimit)
+}
+
+export class GoogleProvisioner extends GoogleDrive {
+  constructor(client: AuthClient, approved: Set<string>, private sharedDriveId?: string) {
+    super(client, approved)
+  }
+
+  private async destination() {
+    if (this.sharedDriveId) {
+      const shared = await this.request<{ id: string }>(`${drive}/drives/${this.sharedDriveId}?fields=id`)
+      if (shared.id !== this.sharedDriveId) throw new ConfigurationError('Google could not confirm the Shared Drive.')
+      await this.permissions(shared.id)
+      return shared.id
+    }
+    const account = await this.request<{ user?: { emailAddress?: string } }>(`${drive}/about?fields=user(emailAddress)`)
+    const email = account.user?.emailAddress?.toLowerCase() ?? ''
+    if (!this.approved.has(email)) {
+      throw new ConfigurationError('The signed-in Google account must be included in GOOGLE_ALLOWED_EMAILS.')
+    }
+    const root = await this.file('root')
+    if (!root || root.trashed || root.mimeType !== folderMime || !googleId.safeParse(root.id).success) {
+      throw new ConfigurationError('Google could not find the My Drive root.')
+    }
+    return root.id
+  }
+
+  private async findFile(parent: string, filter: string) {
+    const query = new URLSearchParams({
+      q: `'${parent}' in parents and trashed = false and ${filter}`,
+      fields: 'nextPageToken,incompleteSearch,files(id)', spaces: 'drive', pageSize: '100',
+      supportsAllDrives: 'true', corpora: this.sharedDriveId ? 'drive' : 'user',
+    })
+    if (this.sharedDriveId) {
+      query.set('driveId', this.sharedDriveId)
+      query.set('includeItemsFromAllDrives', 'true')
+    }
+    let id: string | undefined
+    do {
+      const result = await this.request<{ files?: { id: string }[]; nextPageToken?: string; incompleteSearch?: boolean }>(
+        `${drive}/files?${query}`)
+      if (result.incompleteSearch) throw new ConfigurationError('Drive could not confirm whether a matching resource already exists.')
+      for (const file of result.files ?? []) {
+        if (id || !googleId.safeParse(file.id).success) {
+          throw new ConfigurationError('Drive returned multiple or invalid matches. Review the existing resources before continuing.')
+        }
+        id = file.id
+      }
+      if (!result.nextPageToken) return id
+      query.set('pageToken', result.nextPageToken)
+    } while (true)
+  }
+
+  async provision(
+    rowLimit: number,
+    existing: ResourceManifest | null,
+    save: (state: ResourceManifest) => Promise<void>,
+  ) {
+    const rootId = await this.destination()
+    let state = existing
+    if (!state) {
+      if (await this.findFile(rootId, `name = '${folderName}' and mimeType = '${folderMime}'`)) {
+        throw new ConfigurationError('A registration folder already exists. Reuse its provisioning file or configure the existing resource IDs.')
+      }
+      const [folderId] = await this.generateIds(1)
+      state = { rootId, folderId, setupId: randomUUID() }
+      await save(state)
+    } else if (state.rootId !== rootId) {
+      throw new ConfigurationError('The provisioning file belongs to a different Drive root.')
+    }
+
+    const createUrl = `${drive}/files?supportsAllDrives=true&fields=${fileFields}`
+    const { folderId, setupId } = state
+    await this.ensureFile(folderId, rootId, folderName, folderMime, () =>
+      this.request<FileMetadata>(createUrl, 'POST', {
+        id: folderId, name: folderName, mimeType: folderMime, parents: [rootId],
+      }))
+
+    let spreadsheetId = state.spreadsheetId
+    if (!spreadsheetId) {
+      const key = `mimeType = '${sheetMime}' and appProperties has { key='taakraSetupId' and value='${setupId}' }`
+      spreadsheetId = await this.findFile(folderId, key)
+      if (!spreadsheetId) {
+        if (state.spreadsheetRequested) {
+          throw new ConfigurationError('A previous spreadsheet creation has an unknown outcome. Retry to let Drive find it, or review the folder and configure the correct resource IDs.')
+        }
+        state = { ...state, spreadsheetRequested: true }
+        await save(state)
+        try {
+          const sheet = await this.request<FileMetadata>(createUrl, 'POST', {
+            name: folderName, mimeType: sheetMime, parents: [folderId], appProperties: { taakraSetupId: setupId },
+          })
+          spreadsheetId = googleId.parse(sheet.id)
+        } catch (error) {
+          // Drive does not accept preallocated IDs for native Sheets files. Retry only when it rejected creation.
+          if ([400, 401, 403, 404].includes(status(error) ?? 0)) {
+            await save({ ...state, spreadsheetRequested: false })
+            throw new ConfigurationError('Drive rejected spreadsheet creation. Check that the Google account can create files in the folder.')
+          }
+          throw new ConfigurationError('Spreadsheet creation could not be confirmed. Run provision again to look for the same spreadsheet.')
+        }
+      }
+      state = { ...state, spreadsheetId }
+      await save(state)
+    }
+    const google = new GoogleApi(this.client, folderId, spreadsheetId, this.approved, rowLimit)
+    await google.verifySetup(true, true)
+    await save({ ...state, ready: true })
+  }
 }

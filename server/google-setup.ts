@@ -1,12 +1,14 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library'
-import { need } from './config.js'
-import { configuredGoogle, scopes } from './google.js'
+import { ConfigurationError, need } from './config.js'
+import { explicitResources, googleId, readManifest, resourceFile, withManifestLock } from './google-resources.js'
+import { approvedGoogleEmails, configuredGoogle, googleClient, GoogleProvisioner, refreshTokenFile, scopes } from './google.js'
 
 async function connectOrganizer() {
-  const path = need('GOOGLE_REFRESH_TOKEN_FILE')
+  const path = refreshTokenFile()
   const host = '127.0.0.1'
   const port = 53682
   const redirect = `http://${host}:${port}/oauth/callback`
@@ -63,29 +65,50 @@ async function connectOrganizer() {
   console.log('Saved the organizer refresh token to the configured private file.')
 }
 
-async function run() {
-  const command = process.argv[2]
-  if (command === 'oauth') return connectOrganizer()
-  if (command !== 'prepare' && command !== 'verify') throw new Error('Use google:setup -- oauth, prepare or verify.')
-  const rows = Number(process.env.GOOGLE_ROW_LIMIT ?? '20000')
-  if (!Number.isSafeInteger(rows) || rows < 2 || rows > 100000) throw new Error('Invalid GOOGLE_ROW_LIMIT.')
-  const google = await configuredGoogle(rows)
-  try {
-    await google.verifySetup(command === 'prepare')
-  } catch {
-    throw new Error('Google setup failed. Check credential access, approved permissions, the folder name, and the Registrations tab and headers.')
+async function provision(rowLimit: number) {
+  const explicit = explicitResources()
+  const approved = approvedGoogleEmails()
+  const sharedDriveId = process.env.GOOGLE_SHARED_DRIVE_ID || undefined
+  if (!explicit && ((sharedDriveId && !googleId.safeParse(sharedDriveId).success) ||
+      (process.env.GOOGLE_AUTH_MODE === 'service-account' && !sharedDriveId))) {
+    throw new ConfigurationError('Set GOOGLE_SHARED_DRIVE_ID to the Shared Drive ID for automatic provisioning.')
+  }
+
+  if (process.env.GOOGLE_AUTH_MODE === 'oauth' && !process.env.GOOGLE_REFRESH_TOKEN && !existsSync(refreshTokenFile())) {
+    await connectOrganizer()
+  }
+  if (explicit) {
+    const google = await configuredGoogle(rowLimit)
+    await google.verifySetup(true)
+  } else {
+    const path = resourceFile()
+    const google = new GoogleProvisioner(await googleClient(), approved, sharedDriveId)
+    await withManifestLock(path, save => google.provision(rowLimit, readManifest(path), save))
+    console.log('Saved verified Google resource IDs in the private provisioning file.')
   }
   console.log('Google resources passed the permission and worksheet checks.')
 }
 
+async function run() {
+  const command = process.argv[2]
+  if (command === 'oauth') return connectOrganizer()
+  if (command !== 'prepare' && command !== 'verify' && command !== 'provision') {
+    throw new ConfigurationError('Use google:setup -- provision, oauth, prepare or verify.')
+  }
+  const rows = Number(process.env.GOOGLE_ROW_LIMIT ?? '20000')
+  if (!Number.isSafeInteger(rows) || rows < 2 || rows > 100000) throw new ConfigurationError('Invalid GOOGLE_ROW_LIMIT.')
+  if (command === 'provision') return provision(rows)
+
+  const google = await configuredGoogle(rows)
+  await google.verifySetup(command === 'prepare')
+  console.log('Google resources passed the permission and worksheet checks.')
+}
+
 run().catch(error => {
-  // Print only messages created above. Never print Google request/response objects.
-  const messages = [
-    'OAuth failed.', 'Could not bind', 'Google authorization expired.', 'Use google:setup',
-    'Invalid GOOGLE_ROW_LIMIT.', 'Google setup failed.',
-  ]
-  const message = error instanceof Error && messages.some(prefix => error.message.startsWith(prefix))
-    ? error.message : 'Google setup is missing valid credentials or configuration.'
-  console.error(message)
+  // Google request/response objects can contain confidential configuration.
+  const oauthMessages = ['OAuth failed.', 'Could not bind', 'Google authorization expired.']
+  const safe = error instanceof ConfigurationError ||
+    (error instanceof Error && oauthMessages.some(prefix => error.message.startsWith(prefix)))
+  console.error(safe ? error.message : 'Google setup failed. Check credential access, approved permissions, and the registration worksheet.')
   process.exitCode = 1
 })
