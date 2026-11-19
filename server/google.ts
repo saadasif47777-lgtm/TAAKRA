@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { GoogleAuth, OAuth2Client, type AuthClient } from 'google-auth-library'
 import { ConfigurationError, need } from './config.js'
 import { configuredResources, googleId, type ResourceManifest } from './google-resources.js'
+import { GoogleRequestError } from './google-errors.js'
 import type { Registration } from './db.js'
 import type { Document } from './validation.js'
 
@@ -27,20 +28,20 @@ export function refreshTokenFile() {
 export async function googleClient(): Promise<AuthClient> {
   if (process.env.GOOGLE_AUTH_MODE === 'oauth') {
     const client = new OAuth2Client(need('GOOGLE_CLIENT_ID'), need('GOOGLE_CLIENT_SECRET'))
-    const refresh = process.env.GOOGLE_REFRESH_TOKEN ||
-      readFileSync(refreshTokenFile(), 'utf8').trim()
-    if (!refresh) throw new Error('Google refresh token is empty.')
+    let refresh: string
+    try {
+      refresh = process.env.GOOGLE_REFRESH_TOKEN || readFileSync(refreshTokenFile(), 'utf8').trim()
+    } catch {
+      throw new ConfigurationError('Could not read the organizer refresh-token file. Check GOOGLE_REFRESH_TOKEN_FILE.')
+    }
+    if (!refresh) throw new ConfigurationError('Google refresh token is empty.')
     client.setCredentials({ refresh_token: refresh })
     return client
   }
   if (process.env.GOOGLE_AUTH_MODE === 'service-account') {
     return new GoogleAuth({ scopes }).getClient()
   }
-  throw new Error('Select an OAuth or service-account Google authentication mode.')
-}
-
-function status(error: unknown) {
-  return (error as { response?: { status?: number } })?.response?.status
+  throw new ConfigurationError('Select an OAuth or service-account Google authentication mode.')
 }
 
 type FileMetadata = {
@@ -67,16 +68,20 @@ export interface GoogleStorage {
 class GoogleDrive {
   constructor(protected client: AuthClient, protected approved: Set<string>) {}
 
-  protected async request<T>(url: string, method = 'GET', data?: unknown, headers?: Record<string, string>) {
-    const response = await this.client.request<T>({ url, method, data, headers, timeout: 25_000, retry: false })
-    return response.data
+  protected async request<T>(operation: string, url: string, method = 'GET', data?: unknown, headers?: Record<string, string>) {
+    try {
+      const response = await this.client.request<T>({ url, method, data, headers, timeout: 25_000, retry: false })
+      return response.data
+    } catch (error) {
+      throw new GoogleRequestError(operation, error)
+    }
   }
 
   protected async file(id: string) {
     try {
-      return await this.request<FileMetadata>(`${drive}/files/${id}?supportsAllDrives=true&fields=${fileFields}`)
+      return await this.request<FileMetadata>('Reading Google Drive file metadata', `${drive}/files/${id}?supportsAllDrives=true&fields=${fileFields}`)
     } catch (error) {
-      if (status(error) === 404) return null
+      if (error instanceof GoogleRequestError && error.httpStatus === 404) return null
       throw error
     }
   }
@@ -91,7 +96,7 @@ class GoogleDrive {
       const response = await this.request<{
         nextPageToken?: string
         permissions?: { type: string; emailAddress?: string; deleted?: boolean; view?: string }[]
-      }>(`${drive}/files/${id}/permissions?${query}`)
+      }>('Reading Google Drive sharing permissions', `${drive}/files/${id}/permissions?${query}`)
       for (const permission of response.permissions ?? []) {
         if (permission.deleted) continue
         const email = permission.emailAddress?.toLowerCase() ?? ''
@@ -104,9 +109,9 @@ class GoogleDrive {
   }
 
   protected async generateIds(count: number) {
-    const response = await this.request<{ ids: string[] }>(`${drive}/files/generateIds?count=${count}&space=drive`)
+    const response = await this.request<{ ids: string[] }>('Reserving Google Drive file IDs', `${drive}/files/generateIds?count=${count}&space=drive`)
     if (response.ids?.length !== count || new Set(response.ids).size !== count ||
-        response.ids.some(id => !googleId.safeParse(id).success)) throw new Error('Drive returned an invalid ID allocation.')
+        response.ids.some(id => !googleId.safeParse(id).success)) throw new ConfigurationError('Drive returned an invalid ID allocation.')
     return response.ids
   }
 
@@ -119,13 +124,13 @@ class GoogleDrive {
       try {
         file = await create()
       } catch (error) {
-        if (status(error) !== 409) throw error
+        if (!(error instanceof GoogleRequestError) || error.httpStatus !== 409) throw error
         file = await this.file(id)
       }
     }
     if (!file || file.id !== id || file.trashed || file.name !== name || file.mimeType !== mimeType ||
         !file.parents?.includes(parent) || (checksum && file.md5Checksum !== checksum)) {
-      throw new Error('Drive did not confirm the expected file.')
+      throw new ConfigurationError('Drive did not confirm the expected file.')
     }
     await this.permissions(id)
   }
@@ -147,9 +152,9 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
     const sheet = await this.file(this.workbook)
     if (parent?.mimeType !== folderMime || parent.name !== folderName || parent.trashed ||
         sheet?.mimeType !== sheetMime || sheet.trashed ||
-        !sheet.parents?.includes(this.parent)) throw new Error('Google registration resources are missing or misplaced.')
+        !sheet.parents?.includes(this.parent)) throw new ConfigurationError('Google registration resources are missing or misplaced.')
     if (process.env.GOOGLE_AUTH_MODE === 'service-account' && !parent.driveId) {
-      throw new Error('Service-account storage must use a Shared Drive.')
+      throw new ConfigurationError('Service-account storage must use a Shared Drive.')
     }
     await this.permissions(this.parent)
     await this.permissions(this.workbook)
@@ -160,11 +165,11 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
     type Grid = { title: string; sheetId: number; gridProperties: { rowCount: number; columnCount: number } }
     const url = `${sheets}/${this.workbook}`
     const workbook = await this.request<{ sheets: { properties: Grid }[] }>(
-      `${url}?fields=sheets(properties(title,sheetId,gridProperties))`)
+      'Reading Google Sheets worksheet metadata', `${url}?fields=sheets(properties(title,sheetId,gridProperties))`)
     const worksheet = workbook.sheets.find(sheet => sheet.properties.title === 'Registrations')?.properties
     if (!worksheet) {
-      if (!createWorksheet) throw new Error('Create a Registrations worksheet first.')
-      await this.request(`${url}:batchUpdate`, 'POST', {
+      if (!createWorksheet) throw new ConfigurationError('Create a Registrations worksheet first.')
+      await this.request('Creating the Registrations tab in Google Sheets', `${url}:batchUpdate`, 'POST', {
         requests: [{ addSheet: { properties: {
           title: 'Registrations',
           gridProperties: { rowCount: this.rowLimit, columnCount: headers.length },
@@ -175,9 +180,9 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
     }
     const grid = worksheet.gridProperties
     if (grid.rowCount < this.rowLimit || grid.columnCount < headers.length) {
-      if (!prepare) throw new Error('The registration worksheet has insufficient capacity.')
+      if (!prepare) throw new ConfigurationError('The registration worksheet has insufficient capacity.')
       // Update counts only when they need to grow. Existing data and sheet IDs are retained.
-      await this.request(`${url}:batchUpdate`, 'POST', {
+      await this.request('Resizing the Registrations tab in Google Sheets', `${url}:batchUpdate`, 'POST', {
         requests: [{
           updateSheetProperties: {
             properties: {
@@ -190,12 +195,12 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
       })
     }
     const headerUrl = `${url}/values/${encodeURIComponent('Registrations!A1:N1')}`
-    const response = await this.request<{ values?: string[][] }>(headerUrl)
+    const response = await this.request<{ values?: string[][] }>('Reading the Google Sheets registration headers', headerUrl)
     if (JSON.stringify(response.values?.[0]) === JSON.stringify(headers)) return
     if (!prepare || response.values?.some(row => row.some(value => value !== ''))) {
-      throw new Error('The registration worksheet header does not match.')
+      throw new ConfigurationError('The registration worksheet header does not match.')
     }
-    await this.request(`${headerUrl}?valueInputOption=RAW`, 'PUT', { values: [headers] })
+    await this.request('Writing the Google Sheets registration headers', `${headerUrl}?valueInputOption=RAW`, 'PUT', { values: [headers] })
     await this.verifySetup()
   }
 
@@ -206,7 +211,7 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
   async saveFolder(id: string, reference: string) {
     const meta = { id, name: reference, mimeType: folderMime, parents: [this.parent] }
     await this.ensureFile(id, this.parent, reference, folderMime, () =>
-      this.request<FileMetadata>(`${drive}/files?supportsAllDrives=true&fields=${fileFields}`, 'POST', meta))
+      this.request<FileMetadata>('Creating the student folder in Google Drive', `${drive}/files?supportsAllDrives=true&fields=${fileFields}`, 'POST', meta))
   }
 
   async saveDocument(id: string, folder: string, doc: Document) {
@@ -223,7 +228,7 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
         Buffer.from(`\r\n--${boundary}--\r\n`),
       ])
       return this.request<FileMetadata>(
-        `${upload}/files?uploadType=multipart&supportsAllDrives=true&fields=${fileFields}`,
+        'Uploading a document to Google Drive', `${upload}/files?uploadType=multipart&supportsAllDrives=true&fields=${fileFields}`,
         'POST', body, { 'Content-Type': `multipart/related; boundary=${boundary}` },
       )
     }, checksum)
@@ -235,7 +240,7 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
 
   async saveRow(record: Registration, ids: string[]) {
     const url = this.rowUrl(record.sheet_row)
-    const current = await this.request<{ values?: string[][] }>(url)
+    const current = await this.request<{ values?: string[][] }>('Reading a registration row in Google Sheets', url)
     const values = current.values?.[0]
     if (values?.some(value => value !== '')) {
       const expected = this.rowValues(record, ids)
@@ -245,7 +250,7 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
       return
     }
     const result = await this.request<{ updatedRows?: number; updatedData?: { values?: string[][] } }>(
-      `${url}?valueInputOption=RAW&includeValuesInResponse=true`,
+      'Writing a registration row in Google Sheets', `${url}?valueInputOption=RAW&includeValuesInResponse=true`,
       'PUT', { values: [this.rowValues(record, ids)] },
     )
     if (result.updatedRows !== 1 || result.updatedData?.values?.[0]?.length !== headers.length) {
@@ -264,18 +269,18 @@ export class GoogleApi extends GoogleDrive implements GoogleStorage {
 
   async removeRow(record: Registration) {
     const url = this.rowUrl(record.sheet_row)
-    const response = await this.request<{ values?: string[][] }>(url)
+    const response = await this.request<{ values?: string[][] }>('Reading a registration row in Google Sheets', url)
     const values = response.values?.[0]
     if (!values?.some(value => value !== '')) return
     if (values[0] !== record.reference) throw new Error('Cannot clear a worksheet row with a different reference.')
-    await this.request(`${url}:clear`, 'POST', {})
+    await this.request('Clearing a registration row in Google Sheets', `${url}:clear`, 'POST', {})
   }
 
   async removeFolder(id: string) {
     try {
-      await this.request(`${drive}/files/${id}?supportsAllDrives=true`, 'DELETE')
+      await this.request('Deleting a student folder in Google Drive', `${drive}/files/${id}?supportsAllDrives=true`, 'DELETE')
     } catch (error) {
-      if (status(error) !== 404) throw error
+      if (!(error instanceof GoogleRequestError) || error.httpStatus !== 404) throw error
     }
   }
 }
@@ -300,12 +305,12 @@ export class GoogleProvisioner extends GoogleDrive {
 
   private async destination() {
     if (this.sharedDriveId) {
-      const shared = await this.request<{ id: string }>(`${drive}/drives/${this.sharedDriveId}?fields=id`)
+      const shared = await this.request<{ id: string }>('Checking the Google Shared Drive', `${drive}/drives/${this.sharedDriveId}?fields=id`)
       if (shared.id !== this.sharedDriveId) throw new ConfigurationError('Google could not confirm the Shared Drive.')
       await this.permissions(shared.id)
       return shared.id
     }
-    const account = await this.request<{ user?: { emailAddress?: string } }>(`${drive}/about?fields=user(emailAddress)`)
+    const account = await this.request<{ user?: { emailAddress?: string } }>('Checking the organizer’s Google Drive account', `${drive}/about?fields=user(emailAddress)`)
     const email = account.user?.emailAddress?.toLowerCase() ?? ''
     if (!this.approved.has(email)) {
       throw new ConfigurationError('The signed-in Google account must be included in GOOGLE_ALLOWED_EMAILS.')
@@ -330,7 +335,7 @@ export class GoogleProvisioner extends GoogleDrive {
     let id: string | undefined
     do {
       const result = await this.request<{ files?: { id: string }[]; nextPageToken?: string; incompleteSearch?: boolean }>(
-        `${drive}/files?${query}`)
+        'Looking for existing registration resources in Google Drive', `${drive}/files?${query}`)
       if (result.incompleteSearch) throw new ConfigurationError('Drive could not confirm whether a matching resource already exists.')
       for (const file of result.files ?? []) {
         if (id || !googleId.safeParse(file.id).success) {
@@ -364,7 +369,7 @@ export class GoogleProvisioner extends GoogleDrive {
     const createUrl = `${drive}/files?supportsAllDrives=true&fields=${fileFields}`
     const { folderId, setupId } = state
     await this.ensureFile(folderId, rootId, folderName, folderMime, () =>
-      this.request<FileMetadata>(createUrl, 'POST', {
+      this.request<FileMetadata>('Creating the registration folder in Google Drive', createUrl, 'POST', {
         id: folderId, name: folderName, mimeType: folderMime, parents: [rootId],
       }))
 
@@ -379,17 +384,18 @@ export class GoogleProvisioner extends GoogleDrive {
         state = { ...state, spreadsheetRequested: true }
         await save(state)
         try {
-          const sheet = await this.request<FileMetadata>(createUrl, 'POST', {
+          const sheet = await this.request<FileMetadata>('Creating the registration spreadsheet in Google Drive', createUrl, 'POST', {
             name: folderName, mimeType: sheetMime, parents: [folderId], appProperties: { taakraSetupId: setupId },
           })
           spreadsheetId = googleId.parse(sheet.id)
         } catch (error) {
           // Drive does not accept preallocated IDs for native Sheets files. Retry only when it rejected creation.
-          if ([400, 401, 403, 404].includes(status(error) ?? 0)) {
+          if (error instanceof GoogleRequestError && [400, 401, 403, 404].includes(error.httpStatus ?? 0)) {
             await save({ ...state, spreadsheetRequested: false })
-            throw new ConfigurationError('Drive rejected spreadsheet creation. Check that the Google account can create files in the folder.')
+            throw error
           }
-          throw new ConfigurationError('Spreadsheet creation could not be confirmed. Run provision again to look for the same spreadsheet.')
+          const context = error instanceof GoogleRequestError ? `${error.message} ` : ''
+          throw new ConfigurationError(`${context}Spreadsheet creation could not be confirmed. Run provision again to look for the same spreadsheet.`)
         }
       }
       state = { ...state, spreadsheetId }

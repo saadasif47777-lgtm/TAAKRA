@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import type { AuthClient } from 'google-auth-library'
+import { GoogleRequestError } from '../server/google-errors.js'
 import { GoogleProvisioner, headers } from '../server/google.js'
 import { configuredResources, readManifest, withManifestLock } from '../server/google-resources.js'
 
@@ -114,7 +115,7 @@ test('provisions private resources, resumes interrupted creation, and publishes 
   delete process.env.GOOGLE_SPREADSHEET_ID
   try {
     google.loseFolderResponse = true
-    await assert.rejects(run(), /No folder response/)
+    await assert.rejects(run(), /Creating the registration folder in Google Drive failed without a Google error code/)
     assert.throws(configuredResources, /missing or incomplete/)
     assert.equal(readManifest(path)?.folderId, 'registration-folder')
 
@@ -155,4 +156,29 @@ test('refuses Shared Drive creation before any writes when inherited permissions
     /unapproved permission/,
   )
   assert.equal(google.folderCreates + google.spreadsheetCreates, 0)
+})
+
+test('reports the Google operation and supported error codes without exposing request or response content', () => {
+  const sensitive = 'private-auth-or-resource-data'
+  const error = new GoogleRequestError('Checking Google Drive access', {
+    config: { url: sensitive, headers: { Authorization: sensitive } },
+    response: {
+      status: 403,
+      data: {
+        error: {
+          message: sensitive,
+          status: 'PERMISSION_DENIED',
+          details: [{ reason: sensitive }, { reason: 'SERVICE_DISABLED' }],
+        },
+      },
+    },
+  })
+  assert.equal(error.httpStatus, 403)
+  assert.match(error.message, /^Checking Google Drive access failed \(HTTP 403, SERVICE_DISABLED\)\./)
+  assert(!error.message.includes(sensitive))
+  const oauth = new GoogleRequestError('Exchanging the Google authorization code', {
+    response: { status: 400, data: { error: 'invalid_grant', error_description: sensitive } },
+  })
+  assert.match(oauth.message, /HTTP 400, invalid_grant/)
+  assert(!oauth.message.includes(sensitive))
 })

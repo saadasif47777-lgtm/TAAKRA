@@ -4,6 +4,7 @@ import { writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { CodeChallengeMethod, OAuth2Client } from 'google-auth-library'
 import { ConfigurationError, need } from './config.js'
+import { GoogleRequestError } from './google-errors.js'
 import { explicitResources, googleId, readManifest, resourceFile, withManifestLock } from './google-resources.js'
 import { approvedGoogleEmails, configuredGoogle, googleClient, GoogleProvisioner, refreshTokenFile, scopes } from './google.js'
 
@@ -35,15 +36,18 @@ async function connectOrganizer() {
       exchanging = true
       try {
         const code = callback.searchParams.get('code')
-        if (!code) throw new Error('Google did not provide an authorization code.')
-        const { tokens } = await client.getToken({ code, codeVerifier })
-        if (!tokens.refresh_token) throw new Error('Google did not issue a refresh token.')
+        if (!code) throw new ConfigurationError('Google did not provide an authorization code. Check the consent result in your browser.')
+        const { tokens } = await client.getToken({ code, codeVerifier }).catch(error => {
+          throw new GoogleRequestError('Exchanging the Google authorization code', error)
+        })
+        if (!tokens.refresh_token) throw new ConfigurationError('Google did not issue a refresh token.')
         await writeFile(path, tokens.refresh_token + '\n', { mode: 0o600, flag: 'wx' })
         res.end('Organizer authorization saved. You can close this tab.')
         resolve()
-      } catch {
+      } catch (error) {
         res.writeHead(400).end('Authorization could not be saved. Check your terminal.')
-        reject(new Error('OAuth failed. Check consent, redirect URI and that the token output path does not already exist.'))
+        reject(error instanceof ConfigurationError || error instanceof GoogleRequestError ? error
+          : new ConfigurationError('Could not save the organizer refresh token. Check that the output path is writable and does not already exist.'))
       } finally {
         clearTimeout(timeout)
         server.close()
@@ -51,11 +55,11 @@ async function connectOrganizer() {
     })
     const timeout = setTimeout(() => {
       server.close()
-      reject(new Error('Google authorization expired. Start the flow again.'))
+      reject(new ConfigurationError('Google authorization expired. Start the flow again.'))
     }, 5 * 60_000)
     server.once('error', () => {
       clearTimeout(timeout)
-      reject(new Error('Could not bind the local OAuth callback port.'))
+      reject(new ConfigurationError('Could not bind the local OAuth callback port.'))
     })
     server.listen(port, host, () => {
       console.log('Open this consent URL on this computer and sign in as the organizer:')
@@ -106,9 +110,7 @@ async function run() {
 
 run().catch(error => {
   // Google request/response objects can contain confidential configuration.
-  const oauthMessages = ['OAuth failed.', 'Could not bind', 'Google authorization expired.']
-  const safe = error instanceof ConfigurationError ||
-    (error instanceof Error && oauthMessages.some(prefix => error.message.startsWith(prefix)))
-  console.error(safe ? error.message : 'Google setup failed. Check credential access, approved permissions, and the registration worksheet.')
+  const safe = error instanceof ConfigurationError || error instanceof GoogleRequestError
+  console.error(safe ? error.message : 'Google setup stopped unexpectedly. Check the configured Google credentials and try again.')
   process.exitCode = 1
 })
