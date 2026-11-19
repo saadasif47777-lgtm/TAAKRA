@@ -11,7 +11,7 @@
     "dev": "concurrently -k \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch --env-file-if-exists=.env server/index.ts",
     "dev:web": "vite --host 0.0.0.0",
-    "build": "tsc -p tsconfig.json && vite build && tsc -p tsconfig.server.json",
+    "build": "tsc -p tsconfig.json && node scripts/build-web.mjs && tsc -p tsconfig.server.json",
     "start": "node --env-file-if-exists=.env dist-server/index.js",
     "start:deploy": "node --env-file-if-exists=.env dist-server/index.js --migrate",
     "db:migrate": "tsx --env-file-if-exists=.env server/migrate.ts",
