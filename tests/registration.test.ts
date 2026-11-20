@@ -380,3 +380,94 @@ test('continuous form, hero navigation, reduced motion, retry and receipt in Chr
     await browser.close()
   }
 })
+
+test('uploads images larger than Vercel’s function body limit in private, repeatable parts', async () => {
+  let wakeups = 0
+  const app = createApp(pool, settings, resolve('dist'), { chunkedUploads: true, onPending: () => { wakeups++ } })
+  const partServer = app.listen(0, '127.0.0.1')
+  await new Promise<void>(ready => partServer.once('listening', ready))
+  try {
+    const address = partServer.address()
+    assert(address && typeof address === 'object')
+    const endpoint = `http://127.0.0.1:${address.port}`
+    const config = await fetch(`${endpoint}/api/config`)
+    assert.equal((await config.json()).chunkedUploads, true)
+
+    const key = randomUUID()
+    const keyHeader = { 'Idempotency-Key': key, 'Content-Type': 'application/json' }
+    const start = await fetch(`${endpoint}/api/upload`, { method: 'POST', headers: keyHeader, body: '{}' })
+    assert.equal(start.status, 201)
+    const { uploadId } = await start.json()
+    const submitHeader = { ...keyHeader, 'Upload-Id': uploadId }
+    const uploadHeader = { ...submitHeader, 'Content-Type': 'application/octet-stream' }
+    const fields = Object.fromEntries([...form('Test/Vercel-chunks')].filter(([, value]) => typeof value === 'string'))
+    const finalize = () => fetch(`${endpoint}/api/registration`, {
+      method: 'POST', headers: submitHeader, body: JSON.stringify(fields),
+    })
+    function put(kind: string, size: number, part: number, bytes: Uint8Array<ArrayBuffer>, headers = uploadHeader) {
+      const query = new URLSearchParams({ kind, mime: 'image/png', size: String(size), part: String(part) })
+      return fetch(`${endpoint}/api/upload?${query}`, { method: 'PUT', headers, body: bytes })
+    }
+    const { randomBytes } = await import('node:crypto')
+    const large = new Uint8Array(await sharp(randomBytes(1300 * 1300 * 3), {
+      raw: { width: 1300, height: 1300, channels: 3 },
+    }).png().toBuffer())
+    assert(large.length > 4_500_000 && large.length <= 5 * 1024 * 1024)
+
+    const size = 2 * 1024 * 1024
+    const chunk = large.slice(0, size)
+    assert.equal((await put('passport-photo', large.length, 0, chunk, { ...uploadHeader, 'Idempotency-Key': randomUUID() })).status, 409)
+    assert.equal((await put('passport-photo', large.length, 0, chunk)).status, 204)
+    assert.equal((await put('passport-photo', large.length, 0, chunk)).status, 204)
+    assert.equal((await put('passport-photo', large.length, 0, new Uint8Array(size))).status, 409)
+    assert.equal((await put('passport-photo', 6 * 1024 * 1024, 0, chunk)).status, 400)
+    assert.equal((await put('passport-photo', large.length, 0, new Uint8Array(size + 1))).status, 413)
+    for (const [index, kind] of documentKeys.entries()) {
+      const content = index === 0 ? large : png
+      for (let offset = 0; offset < content.length; offset += size) {
+        const response = await put(kind, content.length, offset / size, content.slice(offset, offset + size))
+        assert.equal(response.status, 204)
+      }
+    }
+
+    const response = await finalize()
+    assert.equal(response.status, 202)
+    const result = await response.json()
+    assert.equal(result.status, 'pending')
+    assert.equal(wakeups, 1)
+    assert.equal((await pool.query('SELECT 1 FROM upload_parts')).rowCount, 0)
+    assert.equal((await pool.query('SELECT 1 FROM registration_documents WHERE reference = $1', [result.reference])).rowCount, 4)
+    const repeated = await finalize()
+    assert.equal(repeated.status, 202)
+    assert.equal((await repeated.json()).reference, result.reference)
+
+    if (process.env.TEST_CHROMIUM_EXECUTABLE) {
+      const browser = await chromium.launch({ executablePath: process.env.TEST_CHROMIUM_EXECUTABLE, args: ['--no-sandbox'] })
+      try {
+        const page = await browser.newPage()
+        await page.goto(endpoint)
+        const largeRequests: number[] = []
+        partServer.prependListener('request', req => {
+          if (req.method === 'PUT') largeRequests.push(Number(req.headers['content-length']))
+        })
+        for (const [name, value] of Object.entries({ ...fields, roll: 'Test/Vercel-browser' })) {
+          if (name !== 'privacy') await page.locator(`#${name}`).fill(String(value))
+        }
+        for (const [index, kind] of documentKeys.entries()) {
+          await page.locator(`#${kind}-file`).setInputFiles({
+            name: 'test.png', mimeType: 'image/png', buffer: Buffer.from(index === 0 ? large : png),
+          })
+        }
+        await page.locator('#privacy').check()
+        await page.getByRole('button', { name: 'Submit registration' }).click()
+        await page.getByText('Your registration has been received and is being processed.', { exact: true }).waitFor()
+        assert.equal(largeRequests.length, 6)
+        assert(largeRequests.every(bytes => bytes > 0 && bytes <= size))
+      } finally {
+        await browser.close()
+      }
+    }
+  } finally {
+    await new Promise<void>((done, reject) => partServer.close(error => error ? reject(error) : done()))
+  }
+})

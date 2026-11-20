@@ -14,6 +14,7 @@ export async function syncNext(pool: Pool, google: WorkerStorage) {
     locked = (await db.query<{ acquired: boolean }>('SELECT pg_try_advisory_lock($1) AS acquired', [lock])).rows[0].acquired
     if (!locked) return false
     await db.query('DELETE FROM rate_windows WHERE resets_at < now()')
+    await db.query('DELETE FROM upload_sessions WHERE expires_at <= now()')
     const job = (await db.query<Registration>(`
       SELECT * FROM registrations WHERE
         (status = 'complete' AND expires_at <= now()) OR

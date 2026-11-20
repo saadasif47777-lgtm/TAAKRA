@@ -234,7 +234,7 @@ export function App() {
       const result = await submit(data, key.current, percentage => {
         setProgress(percentage)
         setPhase(percentage === null ? 'Finalizing registration' : 'Uploading documents')
-      }, () => setPhase('Uploading documents'))
+      }, () => setPhase('Uploading documents'), settings.chunkedUploads)
       showReceipt(result)
     } catch (error) {
       setChallenge('')

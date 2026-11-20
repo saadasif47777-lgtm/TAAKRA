@@ -18,6 +18,13 @@ export function keyHash(settings: Config, key: string) {
   return digest(settings.appSecret, 'receipt', key)
 }
 
+export async function getRegistration(pool: Pool, settings: Config, key: string) {
+  const { rows: [record] } = await pool.query<Registration>(`
+    SELECT * FROM registrations WHERE request_key = $1 AND status <> 'purging' AND expires_at > now()
+  `, [keyHash(settings, key)])
+  return record
+}
+
 export async function saveRegistration(pool: Pool, settings: Config, key: string, fields: Fields, docs: Document[]) {
   const requestKey = keyHash(settings, key)
   const rollKey = digest(settings.appSecret, 'roll', normalizeRoll(fields.roll))

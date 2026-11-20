@@ -51,7 +51,31 @@ Keep Google sharing **Restricted** and audit inherited permissions and approved 
 
 The worker reserves five Drive IDs before creating storage, verifies the expected folder and four files at those IDs, then writes the assigned spreadsheet row with **RAW** string values. It verifies access controls on the parent, spreadsheet and created Drive resources. Expired records are removed from the active worksheet and Drive (including their folder contents), and local document bytes are dropped after successful sync or at retention expiry. Cleanup of remote copies retries when Google access is unavailable. Set retention for managed backups and review Google version history, organizational retention, and recovery policies separately.
 
-## Deploy
+## Deploy on Vercel
+
+Vercel serves the frontend, registration API, upload endpoint, and the scheduled Google sync function from the same project. Attach private PostgreSQL through Vercel Marketplace (for example, Neon). Google Drive and Sheets remain the organizer’s destination for completed registrations.
+
+1. In your existing Vercel project, use this repository and its root directory. Set the framework preset to **Vite**, output directory to `dist`, and use Node.js 22 or newer with Fluid Compute. Use the build command from `vercel.json`, `npm run build && npm run db:migrate`, so deployment applies schema updates.
+2. In **Storage**, connect a PostgreSQL database. In **Settings → Environment Variables**, configure both `DATABASE_URL` (pooled is fine) and `DATABASE_URL_UNPOOLED` (direct or session pooling). They must connect to the same database. The role used during the build needs schema migration privileges.
+3. Add these variables for **Production**. Keep them server-side by using the exact names below.
+
+   | Variables | Values |
+   | --- | --- |
+   | `NODE_ENV`, `PUBLIC_ORIGIN`, `TRUST_PROXY_HOPS` | `production`, the exact HTTPS URL students will use without a trailing slash, and `1` for direct Vercel ingress. |
+   | `APP_SECRET`, `CRON_SECRET` | Two different private random values. Generate each with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`. Keep the same `APP_SECRET` when redeploying with the same database. |
+   | `RETENTION_DAYS` | The organizer’s approved number of days, from 1 to 365. |
+   | `TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | The Cloudflare Turnstile keys for a widget that allows the hostname in `PUBLIC_ORIGIN`. |
+   | `GOOGLE_AUTH_MODE`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_ALLOWED_EMAILS` | `oauth` for a personal organizer account, followed by the same Google credentials and allowlist used during provisioning. |
+   | `GOOGLE_REFRESH_TOKEN` | The contents of the local `.taakra-google-oauth.secret` file. Enter them directly into Vercel’s environment settings. |
+   | `GOOGLE_PARENT_FOLDER_ID`, `GOOGLE_SPREADSHEET_ID` | The `folderId` and `spreadsheetId` values in the local `.taakra-google.secret` file. |
+
+4. Redeploy from **Deployments**, open the production URL, and check `/api/healthz` and `/api/config` on that domain. Submit a registration with dummy data and images and confirm it completes in Drive and Sheets. Use isolated settings and a separate database and workbook for preview deployments that accept submissions.
+
+Vercel uploads use 2 MiB request parts to stay below its function body limit. Drafts are private database records tied to one submission key, and expired drafts are removed by the sync job. The app starts sync after a submission and while students check pending receipts. The scheduled job runs daily at 03:00 UTC by default and picks up abandoned retries and cleanup. Configure a shorter schedule if your Vercel plan supports it and the event needs faster unattended recovery. Vercel supplies the `CRON_SECRET` in the scheduled request’s authorization header.
+
+Deployment guidance for a long-running Node.js or container host follows below.
+
+## Deploy on a container host
 
 Use a long-running Node.js/container host with a private managed PostgreSQL database. The process runs the HTTP API and retry worker together and needs network access to PostgreSQL and Google. Use a database connection that supports PostgreSQL session advisory locks (a direct connection or session pool). Keep the database encrypted at rest, use TLS for remote DB connections, and limit its access to the application and operators. Keep `APP_SECRET` stable for the lifecycle of the database because it keys duplicate detection and receipt lookups.
 

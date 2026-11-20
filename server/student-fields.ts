@@ -1,6 +1,7 @@
 // These rules run in the browser and on the server.
 export const fieldLengths = { name: 120, roll: 80, department: 100, semester: 80, mobile: 30, category: 100 }
 export const MAX_FILE = 5 * 1024 * 1024
+export const UPLOAD_PART_SIZE = 2 * 1024 * 1024
 
 function trim(value: unknown) {
   return typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : ''

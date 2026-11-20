@@ -1,10 +1,10 @@
 import pg from 'pg'
 import { need } from './config.js'
 
-export function createPool() {
+export function createPool(connectionString = need('DATABASE_URL'), max = 12) {
   return new pg.Pool({
-    connectionString: need('DATABASE_URL'),
-    max: 12,
+    connectionString,
+    max,
     connectionTimeoutMillis: 5_000,
     idleTimeoutMillis: 30_000,
     statement_timeout: 15_000,
@@ -69,6 +69,21 @@ CREATE TABLE IF NOT EXISTS rate_windows (
   client_key text PRIMARY KEY,
   hits integer NOT NULL,
   resets_at timestamptz NOT NULL
+);
+CREATE TABLE IF NOT EXISTS upload_sessions (
+  session_key text PRIMARY KEY,
+  request_key text NOT NULL,
+  expires_at timestamptz NOT NULL DEFAULT (now() + interval '1 hour')
+);
+CREATE INDEX IF NOT EXISTS upload_sessions_expiry ON upload_sessions (expires_at);
+CREATE TABLE IF NOT EXISTS upload_parts (
+  session_key text NOT NULL REFERENCES upload_sessions(session_key) ON DELETE CASCADE,
+  kind text NOT NULL CHECK (kind IN ('passport-photo','student-card','cnic-front','cnic-back')),
+  part integer NOT NULL CHECK (part BETWEEN 0 AND 2),
+  mimetype text NOT NULL CHECK (mimetype IN ('image/png','image/jpeg')),
+  total_size integer NOT NULL CHECK (total_size BETWEEN 1 AND 5242880),
+  data bytea NOT NULL CHECK (octet_length(data) BETWEEN 1 AND 2097152),
+  PRIMARY KEY (session_key, kind, part)
 );
 CREATE INDEX IF NOT EXISTS registrations_work ON registrations (next_attempt) WHERE status <> 'complete';
 CREATE INDEX IF NOT EXISTS registrations_retention ON registrations (expires_at);

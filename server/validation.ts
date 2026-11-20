@@ -28,7 +28,9 @@ export function validateFields(body: Record<string, unknown>) {
   return result
 }
 
-export async function sanitizeDocument(kind: DocumentKey, file: Express.Multer.File): Promise<Document> {
+export type IncomingDocument = Pick<Express.Multer.File, 'mimetype' | 'buffer' | 'size'>
+
+export async function sanitizeDocument(kind: DocumentKey, file: IncomingDocument): Promise<Document> {
   const jpg = file.mimetype === 'image/jpeg' && file.buffer.subarray(0, 3).equals(Buffer.from([255, 216, 255]))
   const png = file.mimetype === 'image/png' && file.buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
   if ((!jpg && !png) || !file.size || file.size > MAX_FILE) throw new Error('Invalid document.')
@@ -41,7 +43,7 @@ export async function sanitizeDocument(kind: DocumentKey, file: Express.Multer.F
   return { kind, extension: jpg ? 'jpg' : 'png', data }
 }
 
-export async function validateDocuments(files: Record<string, Express.Multer.File[]>) {
+export async function validateDocuments(files: Partial<Record<string, IncomingDocument[]>>) {
   const docs: Document[] = []
   const errors: Record<string, string> = {}
   for (const kind of documentKeys) {

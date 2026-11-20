@@ -8,3 +8,4 @@ dist-server/
 playwright-report/
 test-results/
 .cache/
+.vercel/
