@@ -3,7 +3,7 @@ import { MotionConfig, motion, useReducedMotion } from 'motion/react'
 import { ArrowRight, ArrowUp, Check, Clock3, Download, FileImage, LockKeyhole, Mail, ShieldCheck } from 'lucide-react'
 import Turnstile from 'react-turnstile'
 import { fieldLengths, MAX_FILE, validateStudentFields } from '../server/student-fields'
-import { ApiError, getConfig, getReceipt, submit, type PortalConfig, type Receipt } from './api'
+import { ApiError, createRegistrationKey, getConfig, getReceipt, submit, type PortalConfig, type Receipt } from './api'
 import { Header, Hero } from './Hero'
 import { documents, UploadControl, type DocumentKey } from './UploadControl'
 
@@ -207,7 +207,6 @@ export function App() {
     setMessage('')
     inFlight.current = true
     try {
-      key.current ||= crypto.randomUUID()
       if (recover.current) {
         setPhase('Checking your details')
         const existing = await getReceipt(key.current, AbortSignal.timeout(10_000))
@@ -229,6 +228,7 @@ export function App() {
       data.set('privacy', 'yes')
       if (challenge) data.set('challenge', challenge)
 
+      key.current ||= createRegistrationKey()
       setPhase('Checking your details')
       recover.current = true
       const result = await submit(data, key.current, percentage => {

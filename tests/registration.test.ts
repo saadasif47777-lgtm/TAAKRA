@@ -270,7 +270,11 @@ test('continuous form, hero navigation, reduced motion, retry and receipt in Chr
     })
     const pageErrors: unknown[] = []
     page.on('pageerror', error => pageErrors.push(error))
+    await page.addInitScript(() => {
+      Object.defineProperty(crypto, 'randomUUID', { value: undefined })
+    })
     await page.goto(base)
+    assert.equal(await page.evaluate(() => typeof crypto.randomUUID), 'undefined')
     await page.getByRole('heading', { name: /step into the arena/i }).waitFor()
     assert(await page.locator('.hero-art img').evaluate((img: HTMLImageElement) => img.naturalWidth > 0))
     assert(await page.evaluate(() => matchMedia('(prefers-reduced-motion: reduce)').matches && getComputedStyle(document.documentElement).scrollBehavior === 'auto'))
@@ -323,8 +327,13 @@ test('continuous form, hero navigation, reduced motion, retry and receipt in Chr
     const privacy = page.getByRole('checkbox', { name: /I confirm my information is correct/ })
     await privacy.check()
     const keys: string[] = []
+    let receiptChecks = 0
     await page.route('**/api/registration', async route => {
-      if (route.request().method() !== 'POST') { await route.continue(); return }
+      if (route.request().method() === 'GET') {
+        if (++receiptChecks === 1) await route.abort('connectionfailed')
+        else await route.continue()
+        return
+      }
       keys.push(route.request().headers()['idempotency-key'])
       if (keys.length === 1) await route.abort('connectionfailed')
       else await route.continue()
@@ -333,6 +342,9 @@ test('continuous form, hero navigation, reduced motion, retry and receipt in Chr
     await page.getByRole('alert').filter({ hasText: 'The connection was interrupted' }).waitFor()
     assert.equal(await page.locator('#name').inputValue(), 'Browser Student')
     assert.equal(await page.getByRole('img', { name: /Preview of CNIC back side/ }).count(), 1)
+    await submitButton.click()
+    await page.getByRole('alert').filter({ hasText: 'Could not reach the registration server' }).waitFor()
+    assert.equal(keys.length, 1)
     await submitButton.click()
     await page.getByText('Your registration has been received and is being processed.', { exact: true }).waitFor()
     assert.deepEqual(keys, [keys[0], keys[0]])
